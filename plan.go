@@ -149,11 +149,15 @@ func buildPlan(ctx context.Context, h *Hetrix, client apiClient) (*plan, error) 
 				return nil, err
 			}
 			if len(diffs) > 0 {
-				if desired.kind == CronMonitor {
-					return nil, fmt.Errorf("cron monitor %q differs, but HetrixTools does not expose all heartbeat fields needed for a safe update: %s", remote.name, formatDiffSummary(diffs))
-				}
-				if err := validateSafeWebsiteUpdate(desired.website, remote.raw, diffs); err != nil {
-					return nil, err
+				switch desired.kind {
+				case WebsiteMonitor:
+					if err := validateSafeWebsiteUpdate(desired.website, remote.raw, diffs); err != nil {
+						return nil, err
+					}
+				case CronMonitor:
+					if err := validateSafeCronUpdate(desired.cron, remote.raw, diffs); err != nil {
+						return nil, err
+					}
 				}
 				p.operations = append(p.operations, operation{kind: opUpdate, key: key, name: remote.name, id: remote.id, contactID: state.contactIDs[desiredContactList(desired)], desired: desired, actual: remote, diffs: diffs})
 			}
@@ -431,6 +435,37 @@ func validateSafeWebsiteUpdate(desired Website, actual api.UptimeMonitor, diffs 
 	return nil
 }
 
+func validateSafeCronUpdate(desired Cron, actual api.UptimeMonitor, diffs []fieldDiff) error {
+	for _, diff := range diffs {
+		switch diff.name {
+		case "category":
+			if desired.Category == "" {
+				return fmt.Errorf("cron monitor %q requires clearing category, which the HetrixTools update API cannot represent safely", desired.Name)
+			}
+		case "repeat_every":
+			if desired.RepeatEvery == 0 {
+				return fmt.Errorf("cron monitor %q requires clearing repeat frequency, which the HetrixTools update API cannot represent safely", desired.Name)
+			}
+		}
+	}
+	publicDetails := []struct {
+		name  string
+		value *bool
+	}{
+		{"server info", actual.InfoPublic},
+		{"CPU", actual.CPUPublic},
+		{"RAM", actual.RAMPublic},
+		{"disk", actual.DiskPublic},
+		{"network", actual.NetPublic},
+	}
+	for _, detail := range publicDetails {
+		if detail.value != nil && *detail.value {
+			return fmt.Errorf("cron monitor %q publishes %s server-agent details; refusing an update that would make server-agent details private", actual.Name, detail.name)
+		}
+	}
+	return nil
+}
+
 func planStatusPages(h *Hetrix, state *remoteState, chosen map[string]*remoteMonitor, p *plan) error {
 	pageNames := make([]string, 0, len(h.statusPages))
 	for name := range h.statusPages {
@@ -531,12 +566,14 @@ func requestForMonitor(m desiredMonitor, id, contactID string, actual *api.Uptim
 		return r
 	}
 	c := m.cron
-	public, showTarget := c.Public, c.ShowTarget
+	public, showTarget, privateAgentDetails := c.Public, c.ShowTarget, false
 	return api.UptimeMonitorRequest{
 		MID: id, Type: "heartbeat", Name: c.Name, Timeout: int64(c.Interval / time.Second),
 		Grace: int64(c.Grace / time.Second), ContactList: contactID, Category: c.Category,
 		AlertAfter: durationMinutesString(c.AlertAfter), RepeatTimes: int64(c.RepeatTimes),
 		RepeatEvery: optionalDurationMinutesString(c.RepeatEvery), Public: &public, ShowTarget: &showTarget,
+		INFOPub: &privateAgentDetails, CPUPub: &privateAgentDetails, RAMPub: &privateAgentDetails,
+		DISKPub: &privateAgentDetails, NETPub: &privateAgentDetails,
 	}
 }
 

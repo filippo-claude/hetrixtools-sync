@@ -49,8 +49,9 @@ type Website struct {
 	DisableSSLHostnameVerification    bool
 }
 
-// Cron describes a HetrixTools heartbeat/server-agent monitor. Interval is the
-// expected time between heartbeats; Grace is the additional grace period.
+// Cron describes a plain HetrixTools heartbeat/dead-man-switch monitor.
+// Interval is the expected time between heartbeats; Grace is the additional
+// grace period. Update requests keep server-agent detail sections private.
 type Cron struct {
 	Name        string
 	ContactList string

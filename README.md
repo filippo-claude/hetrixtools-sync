@@ -22,7 +22,7 @@ It requires Go 1.25 or newer.
 ## Install
 
 ```console
-go get github.com/filippo-claude/hetrixtools-sync@v0.2.1
+go get github.com/filippo-claude/hetrixtools-sync@v0.2.2
 ```
 
 `v0.2.0` is the first release of the declarative library and the first release
@@ -109,8 +109,10 @@ credential-injecting proxies.
   duplicates are an error.
 - Website updates preserve mutable remote settings not exposed by the public
   definition type, including expiration and nameserver warnings.
-- Cron monitors can be created and deleted. An update is refused when the API
-  does not expose enough heartbeat fields to guarantee a lossless upsert.
+- Cron monitors are plain heartbeat/dead-man switches and support create,
+  update, and delete. Updates explicitly keep the unused server-agent detail
+  sections private; updates are refused if the API reports any of those sections
+  as currently public.
 - Status pages manage membership of live, managed monitors. Ignored monitors
   and dangling IDs are preserved. Page presentation settings are untouched.
 - Push always computes and prints a fresh preview before making API calls. An

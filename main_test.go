@@ -3,6 +3,7 @@ package hetrixtools
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -189,9 +190,60 @@ func TestUnknownManagedFieldsFailClosed(t *testing.T) {
 	}
 }
 
-func TestCronDifferenceFailsRatherThanUnsafeUpsert(t *testing.T) {
+func exactCron() api.UptimeMonitor {
 	public, show := false, false
-	m := api.UptimeMonitor{ID: "cron1", Type: "heartbeat", Name: "job", Timeout: 900, ContactListID: "c1", ContactListIDs: []string{"c1"}, Public: &public, ShowTarget: &show, MonitorStatus: "active", PresentFields: present("id", "name", "type", "contact_lists", "category", "timeout", "monitor_status", "public_report", "public_target", "alert_after_minutes", "repeat_alert_times", "repeat_alert_frequency", "grace", "agent_id")}
+	return api.UptimeMonitor{
+		ID: "cron1", Type: "heartbeat", Name: "job", Timeout: 900,
+		ContactListID: "c1", ContactListIDs: []string{"c1"}, Public: &public, ShowTarget: &show,
+		MonitorStatus: "active",
+		PresentFields: present("id", "name", "type", "contact_lists", "category", "timeout", "monitor_status", "public_report", "public_target", "alert_after_minutes", "repeat_alert_times", "repeat_alert_frequency", "grace", "agent_id"),
+	}
+}
+
+func TestPlainCronUpdatePinsServerAgentDetailsPrivate(t *testing.T) {
+	f := &fakeAPI{contacts: []api.ContactList{{ID: "c1", Name: "managed"}}, monitors: []api.UptimeMonitor{exactCron()}}
+	defs := func(h *Hetrix) {
+		h.IgnoreExisting(func(m ExistingMonitor) bool { return !contains(m.ContactLists, "managed") })
+		h.CronDefaults(Cron{Interval: 15 * time.Minute})
+		h.Cron(Cron{Name: "job", ContactList: "managed", Category: "changed"})
+	}
+	if err := runCLI(context.Background(), []string{"test", "push"}, &bytes.Buffer{}, &bytes.Buffer{}, defs, f); err != nil {
+		t.Fatal(err)
+	}
+	if f.updates != 1 || len(f.updateRequests) != 1 {
+		t.Fatalf("updates = %d, requests = %d", f.updates, len(f.updateRequests))
+	}
+	r := f.updateRequests[0]
+	if r.Category != "changed" {
+		t.Fatalf("category = %q", r.Category)
+	}
+	for name, value := range map[string]*bool{
+		"INFOPub": r.INFOPub, "CPUPub": r.CPUPub, "RAMPub": r.RAMPub,
+		"DISKPub": r.DISKPub, "NETPub": r.NETPub,
+	} {
+		if value == nil || *value {
+			t.Errorf("%s = %#v, want false", name, value)
+		}
+	}
+	body, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"INFOPub", "CPUPub", "RAMPub", "DISKPub", "NETPub"} {
+		if value, ok := payload[name]; !ok || value != false {
+			t.Errorf("serialized %s = %#v, present=%v; want false", name, value, ok)
+		}
+	}
+}
+
+func TestCronUpdateRefusesKnownPublicServerAgentDetails(t *testing.T) {
+	m := exactCron()
+	visible := true
+	m.CPUPublic = &visible
 	f := &fakeAPI{contacts: []api.ContactList{{ID: "c1", Name: "managed"}}, monitors: []api.UptimeMonitor{m}}
 	defs := func(h *Hetrix) {
 		h.IgnoreExisting(func(m ExistingMonitor) bool { return !contains(m.ContactLists, "managed") })
@@ -199,11 +251,50 @@ func TestCronDifferenceFailsRatherThanUnsafeUpsert(t *testing.T) {
 		h.Cron(Cron{Name: "job", ContactList: "managed", Category: "changed"})
 	}
 	err := runCLI(context.Background(), []string{"test", "preview"}, &bytes.Buffer{}, &bytes.Buffer{}, defs, f)
-	if err == nil || !strings.Contains(err.Error(), "safe update") {
+	if err == nil || !strings.Contains(err.Error(), "server-agent details") {
 		t.Fatalf("error = %v", err)
 	}
 	if f.updates != 0 {
 		t.Fatal("unsafe cron update was attempted")
+	}
+}
+
+func TestCronUpdateRefusesUnsupportedClears(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*api.UptimeMonitor)
+		wantError string
+	}{
+		{
+			name: "category",
+			configure: func(m *api.UptimeMonitor) {
+				m.Category = "old"
+			},
+			wantError: "clearing category",
+		},
+		{
+			name: "repeat frequency",
+			configure: func(m *api.UptimeMonitor) {
+				m.RepeatEvery = "20m"
+			},
+			wantError: "clearing repeat frequency",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := exactCron()
+			test.configure(&m)
+			f := &fakeAPI{contacts: []api.ContactList{{ID: "c1", Name: "managed"}}, monitors: []api.UptimeMonitor{m}}
+			defs := func(h *Hetrix) {
+				h.IgnoreExisting(func(m ExistingMonitor) bool { return !contains(m.ContactLists, "managed") })
+				h.CronDefaults(Cron{Interval: 15 * time.Minute})
+				h.Cron(Cron{Name: "job", ContactList: "managed"})
+			}
+			err := runCLI(context.Background(), []string{"test", "preview"}, &bytes.Buffer{}, &bytes.Buffer{}, defs, f)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 
