@@ -283,6 +283,15 @@ func TestCreatedMonitorIsAddedToStatusPage(t *testing.T) {
 	}
 }
 
+func TestPrintPlanRefusesUnknownOperationKind(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for an operation preview cannot describe")
+		}
+	}()
+	printPlan(&bytes.Buffer{}, &plan{operations: []operation{{kind: operationKind(99)}}})
+}
+
 func present(fields ...string) map[string]bool {
 	out := make(map[string]bool, len(fields))
 	for _, field := range fields {

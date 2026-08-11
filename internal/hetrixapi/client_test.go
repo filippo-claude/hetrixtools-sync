@@ -1007,6 +1007,57 @@ func TestNullMonitorAndStatusPageListsAreRejected(t *testing.T) {
 	}
 }
 
+func TestUptimeMonitorEditPinsDisabledExpirationWarnings(t *testing.T) {
+	t.Parallel()
+	edit, err := json.Marshal(UptimeMonitorRequest{MID: "m1", Type: "http", Name: "x", Target: "https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(edit, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := payload["SSLExpiryReminder"]; !ok || value != float64(0) {
+		t.Fatalf("edit SSLExpiryReminder = %#v, present=%v", value, ok)
+	}
+	if value, ok := payload["DomainExpiryReminder"]; !ok || value != float64(0) {
+		t.Fatalf("edit DomainExpiryReminder = %#v, present=%v", value, ok)
+	}
+
+	create, err := json.Marshal(UptimeMonitorRequest{Type: "http", Name: "x", Target: "https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = nil
+	if err := json.Unmarshal(create, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload["SSLExpiryReminder"]; ok {
+		t.Fatal("create request should omit SSLExpiryReminder to keep server defaults")
+	}
+	if _, ok := payload["DomainExpiryReminder"]; ok {
+		t.Fatal("create request should omit DomainExpiryReminder to keep server defaults")
+	}
+}
+
+func TestUptimeMonitorRequestEncodesNSChangeAlertAsInteger(t *testing.T) {
+	t.Parallel()
+	for _, alert := range []bool{true, false} {
+		alert := alert
+		body, err := json.Marshal(UptimeMonitorRequest{MID: "m1", Type: "http", Name: "x", Target: "https://example.com", NSChangeAlert: &alert})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `"NSChangeAlert":0`
+		if alert {
+			want = `"NSChangeAlert":1`
+		}
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("payload = %s, want %s", body, want)
+		}
+	}
+}
+
 func TestUptimeMonitorRequestUsesDocumentedExpiryFieldNames(t *testing.T) {
 	t.Parallel()
 	body, err := json.Marshal(UptimeMonitorRequest{Type: "http", Name: "x", Target: "https://example.com", SSLExpirationReminder: 5, DomainExpirationReminder: 30})

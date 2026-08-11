@@ -444,6 +444,21 @@ func (r UptimeMonitorRequest) MarshalJSON() ([]byte, error) {
 	if r.Type == "heartbeat" {
 		payload["Grace"] = r.Grace
 	}
+	// The edit API does not document how omitted parameters are treated, so
+	// edits pin the expiration warnings explicitly; the documented value 0
+	// means off. Create requests omit zeros to keep the server-side defaults.
+	if r.MID != "" && r.Type == "http" {
+		payload["SSLExpiryReminder"] = r.SSLExpirationReminder
+		payload["DomainExpiryReminder"] = r.DomainExpirationReminder
+	}
+	// NSChangeAlert is documented as 1/0, unlike the true/false booleans.
+	if r.NSChangeAlert != nil {
+		nsChangeAlert := int64(0)
+		if *r.NSChangeAlert {
+			nsChangeAlert = 1
+		}
+		payload["NSChangeAlert"] = nsChangeAlert
+	}
 	if r.Keyword != "" {
 		payload["Keyword"] = r.Keyword
 	}

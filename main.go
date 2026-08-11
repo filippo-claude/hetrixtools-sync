@@ -93,6 +93,11 @@ func printPlan(w io.Writer, p *plan) {
 				kind = op.actual.kind
 			}
 			fmt.Fprintf(w, "- %s %s\n", kind, op.name)
+		default:
+			// Push executes exactly the operations printed here, so an
+			// operation this switch cannot describe must never reach
+			// executePlan.
+			panic(fmt.Sprintf("plan contains unprintable operation kind %d", op.kind))
 		}
 	}
 	fmt.Fprintf(w, "\n%d change(s).\n", len(p.operations))
