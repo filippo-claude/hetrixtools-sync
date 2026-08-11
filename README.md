@@ -101,6 +101,13 @@ credential-injecting proxies.
   are never modified or deleted.
 - **Every nonignored existing monitor absent from the definitions is planned for
   deletion.** Review preview before push when changing the ownership predicate.
+- Monitor deletion is performed only for a `- website ...` or `- cron ...`
+  preview line. A `~` line is an in-place update using the existing monitor ID;
+  it never deletes and recreates the monitor, so monitor identity and history
+  are retained. (`- status-page ...` only removes page membership.)
+- Push applies status-page removals and monitor deletions first, then updates,
+  creates, and status-page additions. This frees account capacity before the
+  shared HetrixTools create/update endpoint is called.
 - Desired monitors excluded by `IgnoreExisting` are rejected.
 - Names are stable identities within each monitor type.
 - Unknown managed monitor types, ambiguous contact lists, multiple contact

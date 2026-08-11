@@ -94,6 +94,7 @@ func TestClientUptimeMonitorActionsUseTokenPathAndJSONBody(t *testing.T) {
 	t.Parallel()
 
 	var calls []string
+	var uptimeAddBodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		if got := r.Header.Get("Authorization"); got != "" {
@@ -115,6 +116,7 @@ func TestClientUptimeMonitorActionsUseTokenPathAndJSONBody(t *testing.T) {
 			if got, want := body["Type"], float64(1); got != want {
 				t.Fatalf("Type = %#v, want %#v", got, want)
 			}
+			uptimeAddBodies = append(uptimeAddBodies, body)
 			_, _ = w.Write([]byte(`{"status":"SUCCESS","monitor_id":"mid-1","server_id":"srv-1"}`))
 		case "/v2/test-token/uptime/delete/":
 			var body map[string]string
@@ -157,6 +159,15 @@ func TestClientUptimeMonitorActionsUseTokenPathAndJSONBody(t *testing.T) {
 		"POST /v2/test-token/uptime/delete/",
 	}
 	assertStringSlicesEqual(t, calls, want)
+	if len(uptimeAddBodies) != 2 {
+		t.Fatalf("uptime add request bodies = %d, want 2", len(uptimeAddBodies))
+	}
+	if mid, ok := uptimeAddBodies[0]["MID"]; ok {
+		t.Fatalf("create request MID = %#v, want omitted", mid)
+	}
+	if got, want := uptimeAddBodies[1]["MID"], "mid-1"; got != want {
+		t.Fatalf("update request MID = %#v, want %#v", got, want)
+	}
 }
 
 func TestClientUpsertMethodsChooseCreateOrUpdate(t *testing.T) {

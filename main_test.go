@@ -19,6 +19,7 @@ type fakeAPI struct {
 	creates, updates, deletes, pageAdds, pageRemoves int
 	createRequests                                   []api.UptimeMonitorRequest
 	updateRequests                                   []api.UptimeMonitorRequest
+	mutations                                        []string
 }
 
 func (f *fakeAPI) ListContactLists(context.Context, api.ListContactListsRequest) (*api.ListContactListsResponse, error) {
@@ -30,14 +31,20 @@ func (f *fakeAPI) ListUptimeMonitors(context.Context, api.ListUptimeMonitorsRequ
 func (f *fakeAPI) CreateUptimeMonitor(_ context.Context, r api.UptimeMonitorRequest) (*api.ActionResponse, error) {
 	f.creates++
 	f.createRequests = append(f.createRequests, r)
+	f.mutations = append(f.mutations, "create:"+r.Name)
 	return &api.ActionResponse{Status: "SUCCESS", MonitorID: "created-" + r.Name, ServerID: "server-" + r.Name}, nil
 }
 func (f *fakeAPI) UpdateUptimeMonitor(_ context.Context, r api.UptimeMonitorRequest) (*api.ActionResponse, error) {
 	f.updates++
 	f.updateRequests = append(f.updateRequests, r)
+	f.mutations = append(f.mutations, "update:"+r.Name)
 	return &api.ActionResponse{Status: "SUCCESS"}, nil
 }
-func (f *fakeAPI) DeleteUptimeMonitor(context.Context, string) error { f.deletes++; return nil }
+func (f *fakeAPI) DeleteUptimeMonitor(_ context.Context, id string) error {
+	f.deletes++
+	f.mutations = append(f.mutations, "delete:"+id)
+	return nil
+}
 func (f *fakeAPI) ListStatusPages(context.Context, api.ListStatusPagesRequest) (*api.ListStatusPagesResponse, error) {
 	return &api.ListStatusPagesResponse{StatusPages: f.pages, Meta: onePageMeta()}, nil
 }
@@ -118,6 +125,40 @@ func TestPreviewAndPushPlanTheSameCreate(t *testing.T) {
 	}
 	if !strings.Contains(push.String(), "+ website example") {
 		t.Fatalf("push plan = %q", push.String())
+	}
+}
+
+func TestPushAppliesDeletesAndUpdatesBeforeCreates(t *testing.T) {
+	stale := exactWebsite()
+	stale.ID = "m-stale"
+	stale.Name = "stale"
+	stale.Target = "https://stale.example.com"
+	updated := exactWebsite()
+	updated.ID = "m-update"
+	updated.Name = "update"
+	updated.Target = "https://old.example.com"
+	f := &fakeAPI{
+		contacts: []api.ContactList{{ID: "c1", Name: "managed"}},
+		monitors: []api.UptimeMonitor{stale, updated},
+	}
+	defs := func(h *Hetrix) {
+		standardDefinitions(h)
+		h.Website(Website{Name: "update", Target: "https://new.example.com", ContactList: "managed"})
+		h.Website(Website{Name: "new", Target: "https://new-monitor.example.com", ContactList: "managed"})
+	}
+	var out bytes.Buffer
+	if err := runCLI(context.Background(), []string{"test", "push"}, &out, &bytes.Buffer{}, defs, f); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(f.mutations, ","), "delete:m-stale,update:update,create:new"; got != want {
+		t.Fatalf("mutation order = %q, want %q", got, want)
+	}
+	preview := out.String()
+	deleteAt := strings.Index(preview, "- website stale")
+	updateAt := strings.Index(preview, "~ website update")
+	createAt := strings.Index(preview, "+ website new")
+	if deleteAt < 0 || updateAt < 0 || createAt < 0 || !(deleteAt < updateAt && updateAt < createAt) {
+		t.Fatalf("preview does not match mutation order:\n%s", preview)
 	}
 }
 
@@ -310,13 +351,23 @@ func TestWebsiteUpdatePreservesOutOfSurfaceSettings(t *testing.T) {
 		standardDefinitions(h)
 		h.Website(Website{Name: "example", Target: "https://new.example.com", ContactList: "managed"})
 	}
-	if err := runCLI(context.Background(), []string{"test", "push"}, &bytes.Buffer{}, &bytes.Buffer{}, defs, f); err != nil {
+	var out bytes.Buffer
+	if err := runCLI(context.Background(), []string{"test", "push"}, &out, &bytes.Buffer{}, defs, f); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "~ website example") || strings.Contains(out.String(), "- website example") {
+		t.Fatalf("update preview = %q", out.String())
 	}
 	if len(f.updateRequests) != 1 {
 		t.Fatalf("updates = %d", len(f.updateRequests))
 	}
+	if f.creates != 0 || f.deletes != 0 {
+		t.Fatalf("in-place update made creates=%d deletes=%d", f.creates, f.deletes)
+	}
 	r := f.updateRequests[0]
+	if r.MID != "m1" {
+		t.Fatalf("update MID = %q, want m1", r.MID)
+	}
 	if r.SSLExpirationReminder != 5 || r.DomainExpirationReminder != 30 || r.NSChangeAlert == nil || !*r.NSChangeAlert {
 		t.Fatalf("preserved settings = SSL %d domain %d NS %#v", r.SSLExpirationReminder, r.DomainExpirationReminder, r.NSChangeAlert)
 	}

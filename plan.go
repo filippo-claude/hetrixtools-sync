@@ -578,9 +578,28 @@ func requestForMonitor(m desiredMonitor, id, contactID string, actual *api.Uptim
 }
 
 func sortOperations(ops []operation) {
+	// Apply destructive operations first so monitor replacements work even when
+	// the account is at its monitor limit. Status-page removals must precede
+	// monitor deletion, while additions must follow monitor creation.
+	priority := func(kind operationKind) int {
+		switch kind {
+		case opPageRemove:
+			return 0
+		case opDelete:
+			return 1
+		case opUpdate:
+			return 2
+		case opCreate:
+			return 3
+		case opPageAdd:
+			return 4
+		default:
+			return 5
+		}
+	}
 	sort.SliceStable(ops, func(i, j int) bool {
-		if ops[i].kind != ops[j].kind {
-			return ops[i].kind < ops[j].kind
+		if priority(ops[i].kind) != priority(ops[j].kind) {
+			return priority(ops[i].kind) < priority(ops[j].kind)
 		}
 		if ops[i].pageName != ops[j].pageName {
 			return ops[i].pageName < ops[j].pageName
