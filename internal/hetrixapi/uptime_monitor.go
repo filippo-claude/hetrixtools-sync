@@ -15,12 +15,14 @@ type (
 	// UptimeMonitorRequest describes an uptime monitor create or update request.
 	//
 	// The client sends this request to the documented HetrixTools v2 uptime add
-	// endpoint for both create and update operations:
+	// endpoint for creates and edit endpoint for updates:
 	//
 	//   - Website, ping, service, and SMTP monitors:
 	//     https://docs.hetrixtools.com/api-add-website-ping-service-smtp-uptime-monitor/
 	//   - Server-agent heartbeat monitors:
 	//     https://docs.hetrixtools.com/api-add-server-agent-uptime-monitor-heartbeat-uptime-monitor/
+	//   - Uptime monitor edit endpoint:
+	//     https://gist.github.com/hetrixtools/b6fed467837874491f2a046fac957293
 	//
 	// The Go fields are canonicalized for client users. MarshalJSON converts them
 	// to the v2 payload shape documented by HetrixTools, including numeric Type
@@ -912,16 +914,15 @@ func (c *Client) CreateUptimeMonitor(ctx context.Context, request UptimeMonitorR
 	return decodeActionResponse(body)
 }
 
-// UpdateUptimeMonitor updates a HetrixTools uptime monitor using the documented
-// v2 uptime add endpoint with MID set, as described by HetrixTools:
+// UpdateUptimeMonitor updates a HetrixTools uptime monitor using the v2 uptime
+// edit endpoint with MID set:
 //
-//   - https://docs.hetrixtools.com/api-add-website-ping-service-smtp-uptime-monitor/
-//   - https://docs.hetrixtools.com/api-add-server-agent-uptime-monitor-heartbeat-uptime-monitor/
+//   - https://gist.github.com/hetrixtools/b6fed467837874491f2a046fac957293
 func (c *Client) UpdateUptimeMonitor(ctx context.Context, request UptimeMonitorRequest) (*ActionResponse, error) {
 	if request.MID == "" {
 		return nil, fmt.Errorf("update uptime monitor: MID is required")
 	}
-	body, err := c.doV2JSON(ctx, http.MethodPost, "/uptime/add/", request)
+	body, err := c.doV2JSON(ctx, http.MethodPost, "/uptime/edit/", request)
 	if err != nil {
 		return nil, err
 	}

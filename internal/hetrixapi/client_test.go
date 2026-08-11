@@ -94,7 +94,7 @@ func TestClientUptimeMonitorActionsUseTokenPathAndJSONBody(t *testing.T) {
 	t.Parallel()
 
 	var calls []string
-	var uptimeAddBodies []map[string]any
+	var uptimeMutationBodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		if got := r.Header.Get("Authorization"); got != "" {
@@ -105,7 +105,7 @@ func TestClientUptimeMonitorActionsUseTokenPathAndJSONBody(t *testing.T) {
 		}
 
 		switch r.URL.Path {
-		case "/v2/test-token/uptime/add/":
+		case "/v2/test-token/uptime/add/", "/v2/test-token/uptime/edit/":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode body: %s", err)
@@ -116,7 +116,7 @@ func TestClientUptimeMonitorActionsUseTokenPathAndJSONBody(t *testing.T) {
 			if got, want := body["Type"], float64(1); got != want {
 				t.Fatalf("Type = %#v, want %#v", got, want)
 			}
-			uptimeAddBodies = append(uptimeAddBodies, body)
+			uptimeMutationBodies = append(uptimeMutationBodies, body)
 			_, _ = w.Write([]byte(`{"status":"SUCCESS","monitor_id":"mid-1","server_id":"srv-1"}`))
 		case "/v2/test-token/uptime/delete/":
 			var body map[string]string
@@ -155,17 +155,17 @@ func TestClientUptimeMonitorActionsUseTokenPathAndJSONBody(t *testing.T) {
 
 	want := []string{
 		"POST /v2/test-token/uptime/add/",
-		"POST /v2/test-token/uptime/add/",
+		"POST /v2/test-token/uptime/edit/",
 		"POST /v2/test-token/uptime/delete/",
 	}
 	assertStringSlicesEqual(t, calls, want)
-	if len(uptimeAddBodies) != 2 {
-		t.Fatalf("uptime add request bodies = %d, want 2", len(uptimeAddBodies))
+	if len(uptimeMutationBodies) != 2 {
+		t.Fatalf("uptime mutation request bodies = %d, want 2", len(uptimeMutationBodies))
 	}
-	if mid, ok := uptimeAddBodies[0]["MID"]; ok {
+	if mid, ok := uptimeMutationBodies[0]["MID"]; ok {
 		t.Fatalf("create request MID = %#v, want omitted", mid)
 	}
-	if got, want := uptimeAddBodies[1]["MID"], "mid-1"; got != want {
+	if got, want := uptimeMutationBodies[1]["MID"], "mid-1"; got != want {
 		t.Fatalf("update request MID = %#v, want %#v", got, want)
 	}
 }
@@ -181,7 +181,7 @@ func TestClientUpsertMethodsChooseCreateOrUpdate(t *testing.T) {
 			_, _ = w.Write([]byte(`{"blacklist_monitors":[{"id":"bm-1","target":"existing.example"}],"meta":{"pagination":{"current":1,"last":1}}}`))
 		case "/v2/test-token/blacklist/add/", "/v2/test-token/blacklist/edit/":
 			_, _ = w.Write([]byte(`{"status":"SUCCESS"}`))
-		case "/v2/test-token/uptime/add/":
+		case "/v2/test-token/uptime/add/", "/v2/test-token/uptime/edit/":
 			_, _ = w.Write([]byte(`{"status":"SUCCESS"}`))
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
@@ -209,7 +209,7 @@ func TestClientUpsertMethodsChooseCreateOrUpdate(t *testing.T) {
 		"GET /v3/blacklist-monitors",
 		"POST /v2/test-token/blacklist/edit/",
 		"POST /v2/test-token/uptime/add/",
-		"POST /v2/test-token/uptime/add/",
+		"POST /v2/test-token/uptime/edit/",
 	}
 	assertStringSlicesEqual(t, calls, want)
 }

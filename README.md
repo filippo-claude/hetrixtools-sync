@@ -22,7 +22,7 @@ It requires Go 1.25 or newer.
 ## Install
 
 ```console
-go get github.com/filippo-claude/hetrixtools-sync@v0.2.3
+go get github.com/filippo-claude/hetrixtools-sync@v0.2.4
 ```
 
 `v0.2.0` is the first release of the declarative library and the first release
@@ -106,8 +106,8 @@ credential-injecting proxies.
   it never deletes and recreates the monitor, so monitor identity and history
   are retained. (`- status-page ...` only removes page membership.)
 - Push applies status-page removals and monitor deletions first, then updates,
-  creates, and status-page additions. This frees account capacity before the
-  shared HetrixTools create/update endpoint is called.
+  creates, and status-page additions. This frees account capacity before new
+  monitors are created.
 - Desired monitors excluded by `IgnoreExisting` are rejected.
 - Names are stable identities within each monitor type.
 - Unknown managed monitor types, ambiguous contact lists, multiple contact
