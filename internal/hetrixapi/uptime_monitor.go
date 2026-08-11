@@ -1,6 +1,8 @@
+// Modified by the hetrixtools-sync project from the Apache-2.0 upstream source.
 package hetrixtools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -86,6 +88,12 @@ type (
 		DISKPub *bool `json:"DISKPub,omitempty"`
 		// NETPub controls whether heartbeat network details are public.
 		NETPub *bool `json:"NETPub,omitempty"`
+		// SSLExpirationReminder is the number of days before SSL expiration to alert; zero disables it.
+		SSLExpirationReminder int64 `json:"SSLExpiryReminder,omitempty"`
+		// DomainExpirationReminder is the number of days before domain expiration to alert; zero disables it.
+		DomainExpirationReminder int64 `json:"DomainExpiryReminder,omitempty"`
+		// NSChangeAlert controls nameserver-change alerts.
+		NSChangeAlert *bool `json:"NSChangeAlert,omitempty"`
 	}
 
 	// ListUptimeMonitorsRequest filters uptime monitor list results.
@@ -168,8 +176,10 @@ type (
 		FailsBeforeAlert int64 `json:"fails_before_alert"`
 		// FailedLocations is the number of failed locations required before alerting.
 		FailedLocations int64 `json:"failed_locations"`
-		// ContactListID is the contact list ID used for notifications.
+		// ContactListID is the first contact list ID used for notifications.
 		ContactListID string `json:"contact_list_id"`
+		// ContactListIDs contains every contact list ID returned by the v3 API.
+		ContactListIDs []string `json:"-"`
 		// Category is the HetrixTools monitor category.
 		Category string `json:"category"`
 		// AlertAfter is the delay before sending an alert, such as 5m.
@@ -204,6 +214,18 @@ type (
 		DiskPublic *bool `json:"disk_public"`
 		// NetPublic reports whether heartbeat network details are public.
 		NetPublic *bool `json:"net_public"`
+		// SSLExpirationReminder is the number of days before SSL expiration to alert; zero disables it.
+		SSLExpirationReminder int64 `json:"ssl_expiration_reminder"`
+		// DomainExpirationReminder is the number of days before domain expiration to alert; zero disables it.
+		DomainExpirationReminder int64 `json:"domain_expiration_reminder"`
+		// NSChangeAlert reports whether nameserver-change alerts are enabled.
+		NSChangeAlert *bool `json:"ns_change_alert"`
+		// MonitorStatus is the remote lifecycle status, such as active or paused.
+		MonitorStatus string `json:"monitor_status"`
+		// UnknownFields contains response fields not understood by this client.
+		UnknownFields []string `json:"-"`
+		// PresentFields records raw API response field presence before normalization.
+		PresentFields map[string]bool `json:"-"`
 		// ServerID is the attached server-agent ID. It is nil for non-heartbeat monitors.
 		ServerID *string `json:"server_id"`
 	}
@@ -214,6 +236,8 @@ type (
 		UptimeMonitors []UptimeMonitor `json:"uptime_monitors"`
 		// Meta contains pagination and result-count metadata.
 		Meta Meta `json:"meta"`
+		// MonitorsPresent reports whether the API response contained a recognized monitor list field.
+		MonitorsPresent bool `json:"-"`
 	}
 
 	// ListUptimeMonitorDowntimesResponse is returned by ListUptimeMonitorDowntimes.
@@ -413,6 +437,13 @@ func (r UptimeMonitorRequest) MarshalJSON() ([]byte, error) {
 		typeID, _ := uptimeMonitorTypeID(r.Type)
 		payload["Type"] = typeID
 	}
+	// Zero is meaningful for repeat counts and heartbeat grace. The default
+	// encoding/json omitempty behavior would otherwise make preview claim a
+	// convergent update that push cannot actually send.
+	payload["RepeatTimes"] = r.RepeatTimes
+	if r.Type == "heartbeat" {
+		payload["Grace"] = r.Grace
+	}
 	if r.Keyword != "" {
 		payload["Keyword"] = r.Keyword
 	}
@@ -469,6 +500,11 @@ func (m *UptimeMonitor) UnmarshalJSON(body []byte) error {
 		RAMPublicCamel        *bool           `json:"RAMPub"`
 		DiskPublicCamel       *bool           `json:"DISKPub"`
 		NetPublicCamel        *bool           `json:"NETPub"`
+		SSLExpirationWarn     bool            `json:"ssl_expiration_warn"`
+		SSLExpirationDays     int64           `json:"ssl_expiration_warn_days"`
+		DomainExpirationWarn  bool            `json:"domain_expiration_warn"`
+		DomainExpirationDays  int64           `json:"domain_expiration_warn_days"`
+		NSChangeWarn          *bool           `json:"nameservers_change_warn"`
 	}
 	if err := json.Unmarshal(body, &aux); err != nil {
 		return err
@@ -503,6 +539,9 @@ func (m *UptimeMonitor) UnmarshalJSON(body []byte) error {
 	}
 	if m.SMTPUser == "" {
 		m.SMTPUser = aux.SMTPUserCamel
+	}
+	if len(aux.ContactLists) > 0 {
+		m.ContactListIDs = append([]string(nil), aux.ContactLists...)
 	}
 	if m.ContactListID == "" {
 		if len(aux.ContactLists) > 0 {
@@ -567,7 +606,58 @@ func (m *UptimeMonitor) UnmarshalJSON(body []byte) error {
 	if m.NetPublic == nil {
 		m.NetPublic = aux.NetPublicCamel
 	}
+	if m.SSLExpirationReminder == 0 && aux.SSLExpirationWarn {
+		m.SSLExpirationReminder = aux.SSLExpirationDays
+	}
+	if m.DomainExpirationReminder == 0 && aux.DomainExpirationWarn {
+		m.DomainExpirationReminder = aux.DomainExpirationDays
+	}
+	if m.NSChangeAlert == nil {
+		m.NSChangeAlert = aux.NSChangeWarn
+	}
+	m.UnknownFields, m.PresentFields = inspectUptimeMonitorFields(body)
 	return nil
+}
+
+var knownUptimeMonitorFields = map[string]struct{}{
+	"id": {}, "monitor_id": {}, "MID": {}, "MonitorID": {},
+	"name": {}, "Name": {}, "type": {}, "Type": {}, "target": {}, "Target": {}, "resolve_address": {}, "resolve_address_info": {},
+	"port": {}, "Port": {}, "keyword": {}, "Keyword": {}, "category": {}, "Category": {}, "timeout": {}, "Timeout": {}, "frequency": {}, "Frequency": {}, "check_frequency": {},
+	"contact_list_id": {}, "contact_lists": {}, "created_at": {}, "last_check": {}, "last_status_change": {},
+	"uptime_status": {}, "monitor_status": {}, "uptime": {}, "uptime_incl_maint": {}, "locations": {}, "Locations": {},
+	"ssl_expiration_date": {}, "ssl_expiration_warn": {}, "ssl_expiration_warn_days": {},
+	"domain_expiration_date": {}, "domain_expiration_warn": {}, "domain_expiration_warn_days": {},
+	"nameservers": {}, "nameservers_change_warn": {}, "public_report": {}, "public_target": {},
+	"max_redirects": {}, "MaxRedirects": {}, "http_method": {}, "Method": {}, "accepted_http_codes": {},
+	"verify_ssl_certificate": {}, "verify_ssl_hostname": {}, "verify_ssl_host": {},
+	"number_of_tries": {}, "fails_before_alert": {}, "FailsBeforeAlert": {},
+	"triggering_locations": {}, "failed_locations": {}, "FailedLocations": {},
+	"alert_after_minutes": {}, "alert_after": {}, "AlertAfter": {},
+	"repeat_alert_times": {}, "repeat_times": {}, "RepeatTimes": {},
+	"repeat_alert_frequency": {}, "repeat_every": {}, "RepeatEvery": {},
+	"public": {}, "Public": {}, "show_target": {}, "ShowTarget": {}, "VerSSLCert": {}, "VerSSLHost": {},
+	"smtp_user": {}, "SMTPUser": {}, "ContactList": {}, "HTTPCodes": {},
+	"grace": {}, "Grace": {}, "info_public": {}, "cpu_public": {}, "ram_public": {}, "disk_public": {}, "net_public": {},
+	"INFOPub": {}, "CPUPub": {}, "RAMPub": {}, "DISKPub": {}, "NETPub": {},
+	"ssl_expiration_reminder": {}, "domain_expiration_reminder": {}, "ns_change_alert": {},
+	"agent_id": {}, "server_id": {},
+}
+
+func inspectUptimeMonitorFields(body []byte) ([]string, map[string]bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil {
+		return []string{"<unparseable>"}, nil
+	}
+	present := make(map[string]bool, len(fields))
+	var unknown []string
+	for field := range fields {
+		present[field] = true
+		if _, ok := knownUptimeMonitorFields[field]; !ok {
+			unknown = append(unknown, field)
+		}
+	}
+	sort.Strings(unknown)
+	return unknown, present
 }
 
 // UnmarshalJSON accepts documented and legacy list envelope names.
@@ -582,6 +672,24 @@ func (r *ListUptimeMonitorsResponse) UnmarshalJSON(body []byte) error {
 		return err
 	}
 	*r = ListUptimeMonitorsResponse(aux.listUptimeMonitorsResponse)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return err
+	}
+	var list json.RawMessage
+	for _, field := range []string{"uptime_monitors", "monitors", "data"} {
+		if raw, ok := fields[field]; ok {
+			list = raw
+			break
+		}
+	}
+	if len(list) == 0 || bytes.Equal(bytes.TrimSpace(list), []byte("null")) {
+		return fmt.Errorf("uptime-monitor response omitted a non-null monitor list")
+	}
+	_, hasCanonical := fields["uptime_monitors"]
+	_, hasMonitors := fields["monitors"]
+	_, hasData := fields["data"]
+	r.MonitorsPresent = hasCanonical || hasMonitors || hasData
 	if len(r.UptimeMonitors) == 0 {
 		r.UptimeMonitors = firstNonEmptySlice(aux.Monitors, aux.Data)
 	}
@@ -795,6 +903,9 @@ func (c *Client) CreateUptimeMonitor(ctx context.Context, request UptimeMonitorR
 //   - https://docs.hetrixtools.com/api-add-website-ping-service-smtp-uptime-monitor/
 //   - https://docs.hetrixtools.com/api-add-server-agent-uptime-monitor-heartbeat-uptime-monitor/
 func (c *Client) UpdateUptimeMonitor(ctx context.Context, request UptimeMonitorRequest) (*ActionResponse, error) {
+	if request.MID == "" {
+		return nil, fmt.Errorf("update uptime monitor: MID is required")
+	}
 	body, err := c.doV2JSON(ctx, http.MethodPost, "/uptime/add/", request)
 	if err != nil {
 		return nil, err
@@ -818,7 +929,13 @@ func (c *Client) UpsertUptimeMonitor(ctx context.Context, request UptimeMonitorR
 //
 //   - https://docs.hetrixtools.com/api-delete-uptime-monitor/
 func (c *Client) DeleteUptimeMonitor(ctx context.Context, monitorID string) error {
-	_, err := c.doV2JSON(ctx, http.MethodPost, "/uptime/delete/", map[string]string{"MID": monitorID})
+	if monitorID == "" {
+		return fmt.Errorf("delete uptime monitor: monitor ID is required")
+	}
+	body, err := c.doV2JSON(ctx, http.MethodPost, "/uptime/delete/", map[string]string{"MID": monitorID})
+	if err == nil {
+		_, err = decodeActionResponse(body)
+	}
 	if err == nil {
 		c.clearMonitorCaches()
 	}

@@ -1,3 +1,4 @@
+// Modified by the hetrixtools-sync project from the Apache-2.0 upstream source.
 package hetrixtools
 
 import (
@@ -133,7 +134,15 @@ func NewClientWithBaseURL(baseURL string, token string, options ...Option) *Clie
 		v3BaseURL: v3BaseURL,
 		v2BaseURL: v2BaseURL,
 		token:     token,
-		http:      &http.Client{Timeout: 30 * time.Second},
+		http: &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+					return http.ErrUseLastResponse
+				}
+				return nil
+			},
+		},
 		// HetrixTools v1/v2 allows 120 requests/minute across all v1/v2
 		// endpoints. v3 is limited per user and per API call, so the client uses
 		// a separate limiter per v3 method/path while still honoring 429 retries.
@@ -217,8 +226,12 @@ func decodeActionResponse(body []byte) (*ActionResponse, error) {
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, err
 	}
-	if envelope.Status == "ERROR" || envelope.ErrorMessage != "" {
-		return nil, Error{Response: &APIErrorResponse{Status: envelope.Status, ErrorMessage: envelope.ErrorMessage}}
+	if envelope.Status != "SUCCESS" || envelope.ErrorMessage != "" {
+		message := envelope.ErrorMessage
+		if message == "" {
+			message = fmt.Sprintf("unexpected action status %q", envelope.Status)
+		}
+		return nil, Error{Response: &APIErrorResponse{Status: envelope.Status, ErrorMessage: message}}
 	}
 	return &ActionResponse{Status: envelope.Status, MonitorID: envelope.MonitorID, ServerID: envelope.ServerID, Action: envelope.Action}, nil
 }
@@ -287,9 +300,16 @@ func (c *Client) doRequest(req *http.Request, limiters []requestLimiter) ([]byte
 
 		resp, err := c.http.Do(attemptReq)
 		if err != nil {
-			lastErr = err
+			redacted := fmt.Errorf("request failed: %s", c.redact(err.Error()))
+			lastErr = redacted
+			// A transport failure after a non-idempotent request is ambiguous: the
+			// server may have applied it before the response was lost. Never retry
+			// such a request automatically, as that can create duplicate monitors.
+			if req.Method != http.MethodGet && req.Method != http.MethodHead {
+				return nil, redacted
+			}
 			if attempt == 5 {
-				return nil, err
+				return nil, redacted
 			}
 			if err := sleepContext(attemptReq.Context(), retryDelay(nil, attempt)); err != nil {
 				return nil, err
@@ -304,14 +324,14 @@ func (c *Client) doRequest(req *http.Request, limiters []requestLimiter) ([]byte
 		}
 		updateRateLimits(resp.Header, limiters)
 
-		if resp.StatusCode == http.StatusTooManyRequests && attempt < 5 {
-			lastErr = Error{StatusCode: resp.StatusCode, Body: string(responseBody)}
+		if resp.StatusCode == http.StatusTooManyRequests && attempt < 5 && (req.Method == http.MethodGet || req.Method == http.MethodHead) {
+			lastErr = Error{StatusCode: resp.StatusCode, Body: c.redact(string(responseBody))}
 			blockRateLimiters(limiters, time.Now().Add(retryDelay(resp, attempt)))
 			continue
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, Error{StatusCode: resp.StatusCode, Body: string(responseBody)}
+			return nil, Error{StatusCode: resp.StatusCode, Body: c.redact(string(responseBody))}
 		}
 
 		return responseBody, nil
@@ -464,6 +484,15 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func (c *Client) redact(value string) string {
+	if c.token == "" {
+		return value
+	}
+	value = strings.ReplaceAll(value, c.token, "[REDACTED]")
+	value = strings.ReplaceAll(value, url.PathEscape(c.token), "[REDACTED]")
+	return value
 }
 
 func (c *Client) clearMonitorCaches() {

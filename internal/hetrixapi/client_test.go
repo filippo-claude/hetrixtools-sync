@@ -1,8 +1,10 @@
+// Modified by the hetrixtools-sync project from the Apache-2.0 upstream source.
 package hetrixtools
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -877,5 +879,145 @@ func assertStringSlicesEqual(t *testing.T, got []string, want []string) {
 		if got[i] != want[i] {
 			t.Fatalf("got[%d] = %q, want %q; got all %#v", i, got[i], want[i], got)
 		}
+	}
+}
+
+func TestUptimeMonitorRequestMarshalIncludesMeaningfulZeros(t *testing.T) {
+	t.Parallel()
+	body, err := json.Marshal(UptimeMonitorRequest{Type: "heartbeat", Name: "cron", Timeout: 900, Grace: 0, RepeatTimes: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := payload["Grace"]; !ok || value != float64(0) {
+		t.Fatalf("Grace = %#v, present=%v", value, ok)
+	}
+	if value, ok := payload["RepeatTimes"]; !ok || value != float64(0) {
+		t.Fatalf("RepeatTimes = %#v, present=%v", value, ok)
+	}
+}
+
+func TestUpdateUptimeMonitorRequiresID(t *testing.T) {
+	t.Parallel()
+	c := NewClient("token", WithMinimumRequestInterval(0))
+	if _, err := c.UpdateUptimeMonitor(context.Background(), UptimeMonitorRequest{Name: "missing"}); err == nil {
+		t.Fatal("expected missing MID error")
+	}
+}
+
+func TestDeleteUptimeMonitorChecksActionStatus(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"ERROR","error_message":"not deleted"}`))
+	}))
+	defer server.Close()
+	c := NewClientWithBaseURL(server.URL, "token", WithMinimumRequestInterval(0))
+	if err := c.DeleteUptimeMonitor(context.Background(), "m1"); err == nil || !strings.Contains(err.Error(), "not deleted") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+type failingRoundTripper struct{ calls int }
+
+func (f *failingRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	f.calls++
+	return nil, fmt.Errorf("network failure for %s", r.URL.String())
+}
+
+func TestMutationTransportErrorsAreNotRetriedAndRedactToken(t *testing.T) {
+	t.Parallel()
+	rt := &failingRoundTripper{}
+	c := NewClientWithBaseURL("https://example.invalid", "secret/token", WithHTTPClient(&http.Client{Transport: rt}), WithMinimumRequestInterval(0))
+	_, err := c.CreateUptimeMonitor(context.Background(), UptimeMonitorRequest{Type: "http", Name: "x", Target: "https://example.com"})
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+	if rt.calls != 1 {
+		t.Fatalf("calls = %d, want 1", rt.calls)
+	}
+	if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "token") {
+		t.Fatalf("token leaked in error: %v", err)
+	}
+}
+
+func TestDecodeActionResponseRequiresSuccess(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{`{}`, `{"status":"MAYBE"}`} {
+		if _, err := decodeActionResponse([]byte(body)); err == nil {
+			t.Fatalf("body %s accepted", body)
+		}
+	}
+}
+
+func TestUptimeMonitorTracksUnknownAndPresentFields(t *testing.T) {
+	t.Parallel()
+	var m UptimeMonitor
+	if err := json.Unmarshal([]byte(`{"id":"m1","name":"x","type":"website","future_setting":true}`), &m); err != nil {
+		t.Fatal(err)
+	}
+	if !m.PresentFields["id"] {
+		t.Fatal("id presence not tracked")
+	}
+	if len(m.UnknownFields) != 1 || m.UnknownFields[0] != "future_setting" {
+		t.Fatalf("unknown = %#v", m.UnknownFields)
+	}
+}
+
+func TestMutationTooManyRequestsIsNotRetried(t *testing.T) {
+	t.Parallel()
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, `{"status":"too_many_requests"}`, http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	c := NewClientWithBaseURL(server.URL, "token", WithMinimumRequestInterval(0))
+	if _, err := c.CreateUptimeMonitor(context.Background(), UptimeMonitorRequest{Type: "http", Name: "x", Target: "https://example.com"}); err == nil {
+		t.Fatal("expected 429 error")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+
+func TestStatusPageMutationChecksSuccessBody(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"error","message":"not changed"}`))
+	}))
+	defer server.Close()
+	c := NewClientWithBaseURL(server.URL, "token", WithMinimumRequestInterval(0))
+	if err := c.AddStatusPageMonitors(context.Background(), "page", []string{"monitor"}); err == nil || !strings.Contains(err.Error(), "not changed") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestNullMonitorAndStatusPageListsAreRejected(t *testing.T) {
+	t.Parallel()
+	var monitors ListUptimeMonitorsResponse
+	if err := json.Unmarshal([]byte(`{"monitors":null,"meta":{"pagination":{"current":1,"last":1}}}`), &monitors); err == nil {
+		t.Fatal("null monitor list accepted")
+	}
+	var page StatusPage
+	if err := json.Unmarshal([]byte(`{"id":"p","name":"page","monitors":null}`), &page); err == nil {
+		t.Fatal("null status-page membership accepted")
+	}
+}
+
+func TestUptimeMonitorRequestUsesDocumentedExpiryFieldNames(t *testing.T) {
+	t.Parallel()
+	body, err := json.Marshal(UptimeMonitorRequest{Type: "http", Name: "x", Target: "https://example.com", SSLExpirationReminder: 5, DomainExpirationReminder: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, `"SSLExpiryReminder":5`) || !strings.Contains(text, `"DomainExpiryReminder":30`) {
+		t.Fatalf("payload = %s", text)
+	}
+	if strings.Contains(text, "SSLExpirationReminder") || strings.Contains(text, "DomainExpirationReminder") {
+		t.Fatalf("payload uses undocumented fields: %s", text)
 	}
 }

@@ -1,3 +1,4 @@
+// Modified by the hetrixtools-sync project from the Apache-2.0 upstream source.
 package hetrixtools_test
 
 import (
@@ -10,7 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 
-	hetrixtools "github.com/xaf/terraform-provider-hetrixtools/client"
+	hetrixtools "github.com/filippo-claude/hetrixtools-sync/internal/hetrixapi"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
