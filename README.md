@@ -17,6 +17,16 @@ operations in its output. If the plan is empty, push performs no mutation.
 
 This project is an Apache-2.0 fork of the Go client from
 `xaf/terraform-provider-hetrixtools`. It is not affiliated with HetrixTools.
+It requires Go 1.25 or newer.
+
+## Install
+
+```console
+go get github.com/filippo-claude/hetrixtools-sync@v0.2.0
+```
+
+`v0.2.0` is the first release of the declarative library and the first release
+using this module path; inherited `v0.1.x` tags belong to the upstream provider.
 
 ## Definitions
 
