@@ -22,7 +22,7 @@ It requires Go 1.25 or newer.
 ## Install
 
 ```console
-go get github.com/filippo-claude/hetrixtools-sync@v0.2.2
+go get github.com/filippo-claude/hetrixtools-sync@v0.2.3
 ```
 
 `v0.2.0` is the first release of the declarative library and the first release
