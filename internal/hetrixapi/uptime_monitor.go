@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"time"
 )
 
 type (
@@ -439,10 +440,31 @@ func (r UptimeMonitorRequest) MarshalJSON() ([]byte, error) {
 		typeID, _ := uptimeMonitorTypeID(r.Type)
 		payload["Type"] = typeID
 	}
-	// Zero is meaningful for repeat counts and heartbeat grace. The default
-	// encoding/json omitempty behavior would otherwise make preview claim a
-	// convergent update that push cannot actually send.
-	payload["RepeatTimes"] = r.RepeatTimes
+	// HetrixTools' v2 mutation API uses decimal strings for these optional
+	// values. Durations in the canonical client model include units (for
+	// example, "5m"), but sending those strings causes the API to clear all
+	// three alert-repeat settings.
+	alertAfter, err := v2OptionalMinutes(r.AlertAfter)
+	if err != nil {
+		return nil, fmt.Errorf("AlertAfter: %w", err)
+	}
+	repeatEvery, err := v2OptionalMinutes(r.RepeatEvery)
+	if err != nil {
+		return nil, fmt.Errorf("RepeatEvery: %w", err)
+	}
+	payload["AlertAfter"] = alertAfter
+	payload["RepeatEvery"] = repeatEvery
+	if r.RepeatTimes < 0 {
+		return nil, fmt.Errorf("RepeatTimes must not be negative")
+	}
+	if r.RepeatTimes == 0 {
+		payload["RepeatTimes"] = ""
+	} else {
+		payload["RepeatTimes"] = strconv.FormatInt(r.RepeatTimes, 10)
+	}
+	// Zero is meaningful for heartbeat grace. The default encoding/json
+	// omitempty behavior would otherwise make preview claim a convergent update
+	// that push cannot actually send.
 	if r.Type == "heartbeat" {
 		payload["Grace"] = r.Grace
 	}
@@ -468,6 +490,35 @@ func (r UptimeMonitorRequest) MarshalJSON() ([]byte, error) {
 		payload["HTTPCodes"] = r.HTTPCodes
 	}
 	return json.Marshal(payload)
+}
+
+func v2OptionalMinutes(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if minutes, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if minutes < 0 {
+			return "", fmt.Errorf("must not be negative")
+		}
+		if minutes == 0 {
+			return "", nil
+		}
+		return strconv.FormatInt(minutes, 10), nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return "", fmt.Errorf("must be a duration or decimal minute count: %w", err)
+	}
+	if duration < 0 {
+		return "", fmt.Errorf("must not be negative")
+	}
+	if duration == 0 {
+		return "", nil
+	}
+	if duration%time.Minute != 0 {
+		return "", fmt.Errorf("must be a whole number of minutes")
+	}
+	return strconv.FormatInt(int64(duration/time.Minute), 10), nil
 }
 
 // Validate rejects combinations the documented HetrixTools v2 uptime APIs cannot

@@ -756,6 +756,35 @@ func TestUptimeMonitorRequestMarshalConvertsCanonicalLocationsToV2Codes(t *testi
 	}
 }
 
+func TestUptimeMonitorRequestMarshalConvertsAlertSettingsToV2DecimalStrings(t *testing.T) {
+	t.Parallel()
+
+	body, err := json.Marshal(UptimeMonitorRequest{
+		Type:        "http",
+		Name:        "Homepage",
+		Target:      "https://example.com",
+		AlertAfter:  "5m",
+		RepeatTimes: 3,
+		RepeatEvery: "1h",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for field, want := range map[string]string{
+		"AlertAfter":  "5",
+		"RepeatTimes": "3",
+		"RepeatEvery": "60",
+	} {
+		if got := payload[field]; got != want {
+			t.Errorf("%s = %#v, want %#v", field, got, want)
+		}
+	}
+}
+
 func TestUptimeMonitorRequestMarshalIncludesSMTPFields(t *testing.T) {
 	t.Parallel()
 
@@ -893,9 +922,12 @@ func assertStringSlicesEqual(t *testing.T, got []string, want []string) {
 	}
 }
 
-func TestUptimeMonitorRequestMarshalIncludesMeaningfulZeros(t *testing.T) {
+func TestUptimeMonitorRequestMarshalIncludesExplicitDisabledAlertSettings(t *testing.T) {
 	t.Parallel()
-	body, err := json.Marshal(UptimeMonitorRequest{Type: "heartbeat", Name: "cron", Timeout: 900, Grace: 0, RepeatTimes: 0})
+	body, err := json.Marshal(UptimeMonitorRequest{
+		Type: "heartbeat", Name: "cron", Timeout: 900, Grace: 0,
+		AlertAfter: "0m", RepeatTimes: 0, RepeatEvery: "0m",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -906,8 +938,10 @@ func TestUptimeMonitorRequestMarshalIncludesMeaningfulZeros(t *testing.T) {
 	if value, ok := payload["Grace"]; !ok || value != float64(0) {
 		t.Fatalf("Grace = %#v, present=%v", value, ok)
 	}
-	if value, ok := payload["RepeatTimes"]; !ok || value != float64(0) {
-		t.Fatalf("RepeatTimes = %#v, present=%v", value, ok)
+	for _, field := range []string{"AlertAfter", "RepeatTimes", "RepeatEvery"} {
+		if value, ok := payload[field]; !ok || value != "" {
+			t.Errorf("%s = %#v, present=%v; want explicit empty string", field, value, ok)
+		}
 	}
 }
 
