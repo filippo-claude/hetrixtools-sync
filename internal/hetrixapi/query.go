@@ -2,17 +2,14 @@ package hetrixtools
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"strconv"
-	"sync"
-
-	"github.com/go-playground/validator/v10"
+	"strings"
+	"time"
 )
 
 var (
-	queryValidatorOnce sync.Once
-	queryValidator     *validator.Validate
-
 	blacklistMonitorNamePattern   = regexp.MustCompile(`^[a-zA-Z0-9 .-]+$`)
 	blacklistMonitorTargetPattern = regexp.MustCompile(`^[a-zA-Z0-9.-]+$`)
 	hetrixToolsIDPattern          = regexp.MustCompile(`^[a-fA-F0-9]{32}$`)
@@ -48,7 +45,6 @@ func setBool(values map[string]string, key string, value *bool) {
 }
 
 func validateQuery(query any) error {
-	ensureValidator()
 	if err := validateStruct(query); err != nil {
 		return fmt.Errorf("invalid query: %w", err)
 	}
@@ -56,92 +52,153 @@ func validateQuery(query any) error {
 }
 
 func validateRequest(request any) error {
-	ensureValidator()
 	if err := validateStruct(request); err != nil {
 		return fmt.Errorf("invalid request: %w", err)
 	}
 	return nil
 }
 
-func ensureValidator() {
-	queryValidatorOnce.Do(func() {
-		queryValidator = validator.New(validator.WithRequiredStructEnabled())
-		_ = queryValidator.RegisterValidation("hetrixtools_id", validateHetrixToolsID)
-		_ = queryValidator.RegisterValidation("blacklist_monitor_name", validateBlacklistMonitorName)
-		_ = queryValidator.RegisterValidation("blacklist_monitor_target", validateBlacklistMonitorTarget)
-		_ = queryValidator.RegisterValidation("uptime_location", validateUptimeLocation)
-		queryValidator.RegisterStructValidation(validateContactListsRequest, ListContactListsRequest{})
-		queryValidator.RegisterStructValidation(validateBlacklistMonitorsRequest, ListBlacklistMonitorsRequest{})
-		queryValidator.RegisterStructValidation(validateUptimeMonitorsRequest, ListUptimeMonitorsRequest{})
-		queryValidator.RegisterStructValidation(validateUptimeMonitorDowntimesRequest, ListUptimeMonitorDowntimesRequest{})
-		queryValidator.RegisterStructValidation(validateStatusPagesRequest, ListStatusPagesRequest{})
-		queryValidator.RegisterStructValidation(validateScheduledMaintenancesRequest, ListScheduledMaintenancesRequest{})
-		queryValidator.RegisterStructValidation(validateUptimeMonitorRequest, UptimeMonitorRequest{})
-	})
+type validationErrors []string
+
+func (e validationErrors) Error() string { return strings.Join(e, "; ") }
+
+func (e *validationErrors) add(field, tag, parameter string) {
+	detail := fmt.Sprintf("field %s failed %s validation", field, tag)
+	if parameter != "" {
+		detail += " (" + parameter + ")"
+	}
+	*e = append(*e, detail)
 }
 
+// validateStruct implements the small, deliberately constrained subset of
+// validator tags used by this package. Keeping validation tags on the request
+// structs avoids duplicating field rules while avoiding a large dependency
+// tree for required/enum/range/date checks.
 func validateStruct(value any) error {
-	if err := queryValidator.Struct(value); err != nil {
-		return err
+	var errs validationErrors
+	validateValue(reflect.ValueOf(value), &errs)
+	validateCrossFields(value, &errs)
+	if len(errs) > 0 {
+		return errs
 	}
 	return nil
 }
 
-func validateBlacklistMonitorName(level validator.FieldLevel) bool {
-	return blacklistMonitorNamePattern.MatchString(level.Field().String())
-}
+func validateValue(value reflect.Value, errs *validationErrors) {
+	for value.IsValid() && (value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface) {
+		if value.IsNil() {
+			return
+		}
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Kind() != reflect.Struct {
+		errs.add("request", "struct", "")
+		return
+	}
 
-func validateHetrixToolsID(level validator.FieldLevel) bool {
-	return hetrixToolsIDPattern.MatchString(level.Field().String())
-}
-
-func validateBlacklistMonitorTarget(level validator.FieldLevel) bool {
-	return blacklistMonitorTargetPattern.MatchString(level.Field().String())
-}
-
-func validateUptimeLocation(level validator.FieldLevel) bool {
-	_, ok := uptimeLocationCode(level.Field().String())
-	return ok
-}
-
-func validateContactListsRequest(level validator.StructLevel) {
-	request := level.Current().Interface().(ListContactListsRequest)
-	reportPerPageAboveMax(level, request.PerPage, 200)
-}
-
-func validateBlacklistMonitorsRequest(level validator.StructLevel) {
-	request := level.Current().Interface().(ListBlacklistMonitorsRequest)
-	reportPerPageAboveMax(level, request.PerPage, 1024)
-}
-
-func validateUptimeMonitorsRequest(level validator.StructLevel) {
-	request := level.Current().Interface().(ListUptimeMonitorsRequest)
-	reportPerPageAboveMax(level, request.PerPage, 200)
-}
-
-func validateUptimeMonitorDowntimesRequest(level validator.StructLevel) {
-	request := level.Current().Interface().(ListUptimeMonitorDowntimesRequest)
-	reportPerPageAboveMax(level, request.PerPage, 200)
-}
-
-func validateStatusPagesRequest(level validator.StructLevel) {
-	request := level.Current().Interface().(ListStatusPagesRequest)
-	reportPerPageAboveMax(level, request.PerPage, 100)
-}
-
-func validateScheduledMaintenancesRequest(level validator.StructLevel) {
-	request := level.Current().Interface().(ListScheduledMaintenancesRequest)
-	reportPerPageAboveMax(level, request.PerPage, 200)
-}
-
-func reportPerPageAboveMax(level validator.StructLevel, perPage int, max int) {
-	if perPage > max {
-		level.ReportError(perPage, "PerPage", "per_page", "max", strconv.Itoa(max))
+	typeOfValue := value.Type()
+	for i := 0; i < value.NumField(); i++ {
+		fieldType := typeOfValue.Field(i)
+		fieldValue := value.Field(i)
+		if fieldType.Anonymous {
+			validateValue(fieldValue, errs)
+		}
+		if rules := fieldType.Tag.Get("validate"); rules != "" {
+			validateField(fieldType.Name, fieldValue, strings.Split(rules, ","), errs)
+		}
 	}
 }
 
-func validateUptimeMonitorRequest(level validator.StructLevel) {
-	request := level.Current().Interface().(UptimeMonitorRequest)
+func validateField(name string, value reflect.Value, rules []string, errs *validationErrors) {
+	for i, rule := range rules {
+		if rule == "omitempty" {
+			if value.IsZero() {
+				return
+			}
+			continue
+		}
+		if rule == "dive" {
+			for j := 0; j < value.Len(); j++ {
+				validateField(name+"["+strconv.Itoa(j)+"]", value.Index(j), rules[i+1:], errs)
+			}
+			return
+		}
+
+		tag, parameter, _ := strings.Cut(rule, "=")
+		if !passesRule(value, tag, parameter) {
+			errs.add(name, tag, parameter)
+		}
+	}
+}
+
+func passesRule(value reflect.Value, tag, parameter string) bool {
+	switch tag {
+	case "required":
+		return !value.IsZero()
+	case "oneof":
+		return slicesContain(strings.Fields(parameter), value.String())
+	case "min", "max":
+		limit, err := strconv.ParseInt(parameter, 10, 64)
+		if err != nil {
+			return false
+		}
+		n := value.Int()
+		if tag == "min" {
+			return n >= limit
+		}
+		return n <= limit
+	case "datetime":
+		_, err := time.Parse(parameter, value.String())
+		return err == nil
+	case "hetrixtools_id":
+		return hetrixToolsIDPattern.MatchString(value.String())
+	case "blacklist_monitor_name":
+		return blacklistMonitorNamePattern.MatchString(value.String())
+	case "blacklist_monitor_target":
+		return blacklistMonitorTargetPattern.MatchString(value.String())
+	case "uptime_location":
+		_, ok := uptimeLocationCode(value.String())
+		return ok
+	default:
+		return false
+	}
+}
+
+func slicesContain(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
+func validateCrossFields(value any, errs *validationErrors) {
+	switch request := value.(type) {
+	case ListContactListsRequest:
+		validatePerPage(request.PerPage, 200, errs)
+	case ListBlacklistMonitorsRequest:
+		validatePerPage(request.PerPage, 1024, errs)
+	case ListUptimeMonitorsRequest:
+		validatePerPage(request.PerPage, 200, errs)
+	case ListUptimeMonitorDowntimesRequest:
+		validatePerPage(request.PerPage, 200, errs)
+	case ListStatusPagesRequest:
+		validatePerPage(request.PerPage, 100, errs)
+	case ListScheduledMaintenancesRequest:
+		validatePerPage(request.PerPage, 200, errs)
+	case UptimeMonitorRequest:
+		validateUptimeMonitorRequest(request, errs)
+	}
+}
+
+func validatePerPage(perPage, max int, errs *validationErrors) {
+	if perPage > max {
+		errs.add("PerPage", "max", strconv.Itoa(max))
+	}
+}
+
+func validateUptimeMonitorRequest(request UptimeMonitorRequest, errs *validationErrors) {
 	monitorType := request.Type
 	if monitorType == "" {
 		return
@@ -149,64 +206,62 @@ func validateUptimeMonitorRequest(level validator.StructLevel) {
 
 	if monitorType != "http" {
 		if request.HTTPMethod != "" {
-			level.ReportError(request.HTTPMethod, "HTTPMethod", "http_method", "excluded_unless", "type http")
+			errs.add("HTTPMethod", "excluded_unless", "type http")
 		}
 		if request.MaxRedirects != 0 {
-			level.ReportError(request.MaxRedirects, "MaxRedirects", "max_redirects", "excluded_unless", "type http")
+			errs.add("MaxRedirects", "excluded_unless", "type http")
 		}
 		if request.Keyword != "" {
-			level.ReportError(request.Keyword, "Keyword", "keyword", "excluded_unless", "type http")
+			errs.add("Keyword", "excluded_unless", "type http")
 		}
 		if len(request.HTTPCodes) > 0 {
-			level.ReportError(request.HTTPCodes, "HTTPCodes", "accepted_http_codes", "excluded_unless", "type http")
+			errs.add("HTTPCodes", "excluded_unless", "type http")
 		}
 	}
 
 	if monitorType != "smtp" {
 		if request.Port != 0 {
-			level.ReportError(request.Port, "Port", "port", "excluded_unless", "type smtp")
+			errs.add("Port", "excluded_unless", "type smtp")
 		}
 		if request.SMTPUser != "" {
-			level.ReportError(request.SMTPUser, "SMTPUser", "smtp_user", "excluded_unless", "type smtp")
+			errs.add("SMTPUser", "excluded_unless", "type smtp")
 		}
 		if request.SMTPPass != "" {
-			level.ReportError(request.SMTPPass, "SMTPPass", "smtp_password", "excluded_unless", "type smtp")
+			errs.add("SMTPPass", "excluded_unless", "type smtp")
 		}
 	}
 	if monitorType == "smtp" && request.Port == 0 {
-		level.ReportError(request.Port, "Port", "port", "required", "")
+		errs.add("Port", "required", "")
 	}
 	if (request.SMTPUser == "") != (request.SMTPPass == "") {
-		level.ReportError(request.SMTPUser, "SMTPUser", "smtp_user", "required_with", "smtp_password")
-		level.ReportError(request.SMTPPass, "SMTPPass", "smtp_password", "required_with", "smtp_user")
+		errs.add("SMTPUser", "required_with", "smtp_password")
+		errs.add("SMTPPass", "required_with", "smtp_user")
 	}
 	if (monitorType == "http" || monitorType == "ping" || monitorType == "smtp") && request.Target == "" {
-		level.ReportError(request.Target, "Target", "target", "required", "")
+		errs.add("Target", "required", "")
 	}
 
-	if monitorType != "heartbeat" {
-		if request.Grace != 0 || request.INFOPub != nil || request.CPUPub != nil || request.RAMPub != nil || request.DISKPub != nil || request.NETPub != nil {
-			level.ReportError(monitorType, "Type", "type", "heartbeat_fields", "")
-		}
+	if monitorType != "heartbeat" && (request.Grace != 0 || request.INFOPub != nil || request.CPUPub != nil || request.RAMPub != nil || request.DISKPub != nil || request.NETPub != nil) {
+		errs.add("Type", "heartbeat_fields", "")
 	}
 	if monitorType == "heartbeat" {
 		if request.Target != "" {
-			level.ReportError(request.Target, "Target", "target", "excluded_if", "type heartbeat")
+			errs.add("Target", "excluded_if", "type heartbeat")
 		}
 		if len(request.Locations) > 0 {
-			level.ReportError(request.Locations, "Locations", "locations", "excluded_if", "type heartbeat")
+			errs.add("Locations", "excluded_if", "type heartbeat")
 		}
 		if request.FailedLocations != 0 {
-			level.ReportError(request.FailedLocations, "FailedLocations", "failed_locations", "excluded_if", "type heartbeat")
+			errs.add("FailedLocations", "excluded_if", "type heartbeat")
 		}
 	}
 
 	if monitorType != "http" && monitorType != "smtp" {
 		if request.VerSSLCert != nil {
-			level.ReportError(request.VerSSLCert, "VerSSLCert", "verify_ssl_certificate", "excluded_unless", "type http smtp")
+			errs.add("VerSSLCert", "excluded_unless", "type http smtp")
 		}
 		if request.VerSSLHost != nil {
-			level.ReportError(request.VerSSLHost, "VerSSLHost", "verify_ssl_host", "excluded_unless", "type http smtp")
+			errs.add("VerSSLHost", "excluded_unless", "type http smtp")
 		}
 	}
 }
